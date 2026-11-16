@@ -209,7 +209,7 @@ textarea.field{resize:vertical;font-size:14px}
     <div class="meter"><i id="meter"></i><b id="thrMark" class="hidden"></b></div>
     <details id="turnBox" class="turnbox">
       <summary>Сервер-посредник (TURN) <span id="turnState"></span></summary>
-      <p class="note">Нужен, если друзья видят «соединение не проходит». Бесплатный можно получить на metered.ca (Open Relay) или expressturn.com: после регистрации там будут адрес, логин и пароль. Достаточно настроить у вас — он попадёт в ссылку «Позвать».</p>
+      <p class="note">Встроенный посредник ExpressTURN уже работает у всех. Здесь можно добавить ещё один свой: он попадёт в ссылку «Позвать».</p>
       <label for="turnUrls">Адреса (по одному в строке)</label>
       <textarea id="turnUrls" class="field" rows="3" placeholder="turn:example.relay.metered.ca:80&#10;turn:example.relay.metered.ca:443?transport=tcp" spellcheck="false" autocapitalize="off"></textarea>
       <label for="turnUser">Логин</label>
@@ -574,6 +574,8 @@ async function startNet() {
   S.myId = S.uid;
   setStatus('connecting');
   const ice = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }, { urls: 'stun:stun.cloudflare.com:3478' }];
+  // встроенный бесплатный сервер-посредник ExpressTURN (Европа): выручает, когда прямое соединение режется
+  ice.push({ urls: ['turn:free.expressturn.com:3478', 'turn:free.expressturn.com:3478?transport=tcp'], username: '000000002110282104', credential: 'FcpgaPXTeer30BvvMO6c7eKPg04=' });
   if (S.turn) ice.push(S.turn);
   await Promise.all(STRATS.map((st) => startRoute(st, ice)));
   setInterval(netCheck, 3000);
@@ -621,7 +623,7 @@ async function startRoute(st, ice) {
   };
   safe(() => room.addStream(S.outStream));
 }
-const APP_VER = 5;
+const APP_VER = 6;
 function helloData() { return { uid: S.uid, nick: S.nick, muted: S.muted, v: APP_VER }; }
 function safe(fn) { try { const x = fn(); if (x && typeof x.catch === 'function') x.catch(() => {}); else if (Array.isArray(x)) x.forEach((y) => y && y.catch && y.catch(() => {})); } catch (e) {} }
 function sendHello() { for (const r of routes) if (r.act.hello) safe(() => r.act.hello.send(helloData())); }
