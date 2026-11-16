@@ -605,6 +605,7 @@ async function startRoute(st, ice) {
   };
   r.act.hist.onMessage = (d) => { if (Array.isArray(d)) { const before = S.history.length; d.slice(-300).forEach((m) => addMsg(normMsg(m), true)); if (S.history.length !== before) renderAllMsgs(); } };
   room.onPeerJoin = (pid) => {
+    setTimeout(() => { if (!r.pids.has(pid) && !S.leaving) onHello(r, { nick: 'Участник', v: APP_VER }, pid); }, 5000);
     safe(() => room.addStream(S.outStream, { target: pid }));
     safe(() => r.act.hello.send(helloData(), { target: pid }));
     if (S.history.length) safe(() => r.act.hist.send(S.history.slice(-150), { target: pid }));
@@ -620,15 +621,22 @@ async function startRoute(st, ice) {
   };
   safe(() => room.addStream(S.outStream));
 }
-function helloData() { return { uid: S.uid, nick: S.nick, muted: S.muted }; }
+const APP_VER = 5;
+function helloData() { return { uid: S.uid, nick: S.nick, muted: S.muted, v: APP_VER }; }
 function safe(fn) { try { const x = fn(); if (x && typeof x.catch === 'function') x.catch(() => {}); else if (Array.isArray(x)) x.forEach((y) => y && y.catch && y.catch(() => {})); } catch (e) {} }
 function sendHello() { for (const r of routes) if (r.act.hello) safe(() => r.act.hello.send(helloData())); }
 function onHello(r, d, pid) {
   if (!pid || !d || typeof d !== 'object') return;
-  const uid = clean(d.uid, 32); if (!uid || uid === S.uid) return;
+  // старые версии страницы не присылают uid — тогда опознаём участника по соединению
+  const uid = clean(d.uid, 32) || ('x-' + r.name + '-' + pid);
+  if (uid === S.uid) return;
+  const prev = r.pids.get(pid);
+  if (prev && prev !== uid) detachRoute(prev, r.name, true);
   const known = S.peers.has(uid);
+  const v = Number(d.v) || 0;
+  if (v > APP_VER && !S.newerSeen) { S.newerSeen = true; showUpdate(); }
   r.pids.set(pid, uid);
-  S.members.set(uid, { id: uid, nick: clean(d.nick, 24) || 'Гость', muted: !!d.muted });
+  S.members.set(uid, { id: uid, nick: clean(d.nick, 24) || 'Гость', muted: !!d.muted, old: v < APP_VER });
   const p = getPeer(uid);
   if (!p.routes.has(r.name)) p.routes.set(r.name, { pid, stream: null });
   else p.routes.get(r.name).pid = pid;
@@ -644,10 +652,10 @@ function attachRoute(uid, name, stream) {
   p.fails = 0;
   if (!p.stream || !p.active || !p.routes.get(p.active) || !p.routes.get(p.active).stream) { p.active = name; setRemote(p, stream); }
 }
-function detachRoute(uid, name) {
+function detachRoute(uid, name, quiet) {
   const p = S.peers.get(uid); if (!p) return;
   p.routes.delete(name);
-  if (!p.routes.size) { S.members.delete(uid); dropPeer(uid); blip(false); return; }
+  if (!p.routes.size) { S.members.delete(uid); dropPeer(uid); if (!quiet) blip(false); return; }
   if (p.active === name) {
     p.active = null; clearRemote(p);
     for (const [n, rt] of p.routes) if (rt.stream) { p.active = n; setRemote(p, rt.stream); break; }
@@ -878,6 +886,7 @@ function updateCard(el, id) {
     const p = S.peers.get(id);
     if (p && !p.stream && p.fails >= 2) { st.innerHTML = ICON.wait; st.append(S.turn ? 'соединение не проходит, пробую снова…' : 'не проходит напрямую — нужен TURN (настройки)'); st.classList.add('bad'); }
     else if (!p || !p.stream) { st.innerHTML = ICON.wait; st.append('соединяю…'); }
+    else if (m.old) { st.innerHTML = ICON.wait; st.append('старая версия страницы — пусть обновит'); st.classList.add('bad'); }
     else if (m.muted) { st.innerHTML = ICON.micOff; st.append('микрофон выключен'); st.classList.add('bad'); }
     else if (p.localMute) { st.innerHTML = ICON.vol; st.append('заглушён у вас'); st.classList.add('bad'); }
     else st.append('на связи');
@@ -990,6 +999,13 @@ function renderSettings() {
   $('#sensWrap').classList.toggle('hidden', S.mode !== 'strong');
   $('#sens').value = Math.round(S.cut * 100);
   $('#pttChk').checked = S.pttMode;
+}
+
+function showUpdate() {
+  const t = $('#unlock');
+  t.textContent = 'Вышла новая версия — нажмите, чтобы обновить';
+  t.onclick = () => { leave(); location.href = location.pathname + '?r=' + encodeURIComponent(S.room) + '&u=' + Date.now(); };
+  t.classList.remove('hidden');
 }
 
 /* TURN */
