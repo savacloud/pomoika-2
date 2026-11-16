@@ -417,8 +417,9 @@ async function join() {
   try { await setupAudio(); }
   catch (e) {
     console.error(e);
-    err.textContent = e && e.name === 'NotAllowedError' ? 'Нет доступа к микрофону. Разрешите его в настройках браузера и попробуйте снова.' : 'Не удалось включить микрофон: ' + ((e && (e.message || e.name)) || 'ошибка');
-    btn.disabled = false; btn.textContent = 'Войти'; return;
+    // без микрофона всё равно пускаем: можно слушать и писать в чат
+    try { setupListenOnly(); toast('Микрофон недоступен — вы только слушаете и пишете в чат'); }
+    catch (x) { err.textContent = 'Не удалось включить звук: ' + ((e && (e.message || e.name)) || 'ошибка'); btn.disabled = false; btn.textContent = 'Войти'; return; }
   }
   try { history.replaceState(null, '', location.pathname + '?r=' + encodeURIComponent(room)); } catch (e) {}
   $('#join').classList.add('hidden'); $('#app').classList.remove('hidden');
@@ -462,6 +463,19 @@ async function setupAudio() {
   S.gainNode.connect(S.dest); S.gainNode.connect(S.localAn);
   S.outStream = S.dest.stream;
   applyGain(); applyMode();
+}
+function setupListenOnly() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!S.ctx) { try { S.ctx = new AC({ sampleRate: 48000 }); } catch (e) { S.ctx = new AC(); } }
+  S.ctx.resume().catch(() => {});
+  try { if (S.rawStream) S.rawStream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+  S.rawStream = null; S.proc = null; S.hp = null;
+  S.gainNode = S.ctx.createGain(); S.gainNode.gain.value = 0;
+  S.dest = S.ctx.createMediaStreamDestination();
+  S.localAn = S.ctx.createAnalyser(); S.meterAn = S.localAn;
+  S.gainNode.connect(S.dest); S.gainNode.connect(S.localAn);
+  S.outStream = S.dest.stream;
+  S.listenOnly = true; S.muted = true;
 }
 function withTimeout(p, ms) { return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]); }
 async function makeProcessor() {
@@ -842,6 +856,7 @@ function renderControls() {
   $('#pttBtn').classList.toggle('down', S.pttDown);
 }
 $('#micBtn').onclick = () => {
+  if (S.listenOnly) { toast('Микрофон не разрешён. Разрешите его для этого сайта в настройках браузера и перезайдите.'); return; }
   S.muted = !S.muted; applyGain(); renderControls(); renderPeople();
   sendHello();
 };
