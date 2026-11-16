@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
 <meta name="theme-color" content="#121316">
 <title>Помойка 2</title>
-<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <style>
 :root{
   color-scheme:light dark;
@@ -238,7 +237,7 @@ class VCProc extends AudioWorkletProcessor {
     super();
     const po = (options && options.processorOptions) || {};
     this.mode = po.mode || 'strong';
-    this.cut = typeof po.cut === 'number' ? po.cut : 0.6;
+    this.cut = typeof po.cut === 'number' ? po.cut : 0.65;
     this.floor = 0.002; this.gain = 0; this.open = false; this.holdLeft = 0; this.vad = 0;
     this.speech = 0.03; this.mk = 1;
     this.meter = false; this.mc = 0; this.lastRms = 0; this.lastThr = 0;
@@ -301,7 +300,7 @@ class VCProc extends AudioWorkletProcessor {
     else this.floor += (rms - this.floor) * (this.open ? 0.00005 : 0.0006);
     if (this.floor < 0.0002) this.floor = 0.0002;
     const fThr = Math.max(this.floor * (2.5 + cut * 5), 0.002 + cut * 0.01);
-    const rel = this.speech * (0.08 + cut * 0.37);
+    const rel = this.speech * (0.08 + cut * 0.62);
     const thr = Math.max(fThr, rel);
     const keep = Math.max(fThr * 0.5, rel * 0.8);
     let cond = this.open ? rms > keep : rms > thr;
@@ -309,7 +308,9 @@ class VCProc extends AudioWorkletProcessor {
     const blockSec = buf.length / sampleRate;
     if (cond) { this.open = true; this.holdLeft = 0.2; }
     else if (this.open) { this.holdLeft -= blockSec; if (this.holdLeft <= 0) this.open = false; }
-    if (this.open && rms > thr && (!this.rnn || this.vad > 0.6)) this.speech += (rms - this.speech) * 0.004;
+    // уровень вашего голоса: быстро растёт по громкой речи, вниз сползает очень медленно,
+    // чтобы фоновый телевизор не «утягивал» порог за собой
+    if (this.open && rms > thr && (!this.rnn || this.vad > 0.6)) this.speech += (rms - this.speech) * (rms > this.speech ? 0.01 : 0.0003);
     else if (!this.open) this.speech *= 0.99995;
     this.speech = Math.min(0.35, Math.max(this.speech, 0.008, this.floor * 6));
     const target = this.open ? 1 : 0.002;
@@ -355,7 +356,6 @@ registerProcessor(NAME, VCProc);
 
 <script>
 'use strict';
-const PREFIX = 'golos7-';
 const RNN_URL = 'https://cdn.jsdelivr.net/npm/@jitsi/rnnoise-wasm@0.2.1/dist/rnnoise-sync.js';
 const $ = (s) => document.querySelector(s);
 const ls = (k, v) => { try { if (v === undefined) return localStorage.getItem('golos.' + k); localStorage.setItem('golos.' + k, v); } catch (e) { return null; } };
@@ -384,14 +384,14 @@ const initial = (s) => (Array.from(String(s || '?').trim())[0] || '?').toUpperCa
 const S = {
   nick: '', room: '', myId: '', peer: null, bpeer: null, dir: new Map(), rosterTimer: null,
   bconn: null, bpending: false, battempt: 0, btimer: null, bseen: 0,
-  members: new Map(), peers: new Map(), history: [], seen: new Set(), pendingIds: new Set(), outbox: [],
+  members: new Map(), peers: new Map(), history: [], seen: new Set(), 
   ctx: null, rawStream: null, src: null, hp: null, proc: null, gainNode: null, dest: null, outStream: null, meterAn: null, localAn: null,
-  mode: ls('mode') || 'strong', cut: ls('cut') != null ? +ls('cut') : 0.6,
+  mode: ls('mode') || 'strong', cut: ls('cut2') != null ? +ls('cut2') : 0.65,
   muted: false, deaf: false, pttMode: ls('ptt') === '1', pttDown: false, rnn: false,
   tab: 'people', unread: 0, sigErr: false, hubTimeouts: 0, turn: null, leaving: false, firstRoster: true, wake: null
 };
 if (!['off', 'std', 'strong'].includes(S.mode)) S.mode = 'strong';
-if (!(S.cut >= 0 && S.cut <= 1)) S.cut = 0.6;
+if (!(S.cut >= 0 && S.cut <= 1)) S.cut = 0.65;
 
 /* ---------- экран входа ---------- */
 const params = new URLSearchParams(location.search);
@@ -412,7 +412,6 @@ async function join() {
   const room = normRoom($('#room').value);
   if (!roomOk(room)) { err.textContent = 'Название комнаты: буквы, цифры и дефис'; return; }
   if (!window.isSecureContext || !navigator.mediaDevices) { err.textContent = 'Микрофон работает только по https://. Откройте страницу по ссылке с хостинга.'; return; }
-  if (typeof Peer === 'undefined') { err.textContent = 'Не загрузилась библиотека связи. Проверьте интернет и обновите страницу.'; return; }
   ls('nick', nick); S.nick = nick; S.room = room;
   btn.disabled = true; btn.textContent = 'Включаю микрофон…';
   try { await setupAudio(); }
@@ -427,8 +426,6 @@ async function join() {
   document.title = room === 'pomoyka-2' ? 'Помойка 2' : room + ' · Помойка 2';
   renderControls(); renderPeople();
   startNet();
-  setInterval(maintain, 3000);
-  setInterval(heartbeat, 4000);
   setInterval(speakLoop, 110);
   keepAwake();
 }
@@ -498,7 +495,7 @@ async function makeProcessor() {
   catch (e) { console.warn(e); return null; }
 }
 function applyMode() {
-  ls('mode', S.mode); ls('cut', String(S.cut));
+  ls('mode', S.mode); ls('cut2', String(S.cut));
   if (S.proc) S.proc.port.postMessage({ mode: S.mode, cut: S.cut });
   if (S.hp) S.hp.frequency.setTargetAtTime(S.mode === 'strong' ? 120 : 85, S.ctx.currentTime, 0.05);
   const t = S.rawStream && S.rawStream.getAudioTracks()[0];
@@ -546,130 +543,80 @@ function blip(up) {
   } catch (e) {}
 }
 
-/* ---------- сеть ---------- */
-const hubId = () => PREFIX + S.room + '-hub';
-const isRoomId = (id) => typeof id === 'string' && id.length < 80 && id.startsWith(PREFIX + S.room + '-') && id !== hubId();
+/* ---------- сеть ----------
+   Сигналинг через Trystero (сеть публичных Nostr-релеев): нет единого сервера,
+   который может упасть или быть заблокирован. Голос и чат идут напрямую между участниками. */
+const TRYSTERO_URL = 'https://esm.run/trystero@0.26.0';
+let T = null, room = null, act = {};
 
-function startNet() {
-  S.myId = PREFIX + S.room + '-' + rid(10);
+async function startNet() {
   setStatus('connecting');
-  const p = new Peer(S.myId, peerOpts());
-  S.peer = p;
-  p.on('open', () => { S.sigErr = false; ensureHub(); });
-  p.on('call', onIncomingCall);
-  p.on('connection', (c) => { try { c.close(); } catch (e) {} });
-  p.on('disconnected', () => { if (!S.leaving) setStatus('reconnecting'); });
-  p.on('error', (e) => {
-    const type = e && e.type;
-    if (type === 'peer-unavailable') {
-      const msg = String(e.message || '');
-      if (msg.includes(hubId())) hubLost();
-      return;
+  try { T = await import(TRYSTERO_URL); }
+  catch (e) { console.error(e); S.sigErr = true; setStatus('reconnecting'); toast('Не загрузилась библиотека связи. Проверьте интернет и обновите страницу.'); return; }
+  S.myId = T.selfId;
+  const ice = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }, { urls: 'stun:stun.cloudflare.com:3478' }];
+  if (S.turn) ice.push(S.turn);
+  room = T.joinRoom({ appId: 'savacloud/pomoika-2', rtcConfig: { iceServers: ice } }, S.room, {
+    onJoinError: (err) => {
+      console.warn('join error', err);
+      const id = err && err.peerId;
+      if (id) { const p = getPeer(id); p.fails = (p.fails || 0) + 1; renderPeople(); }
     }
-    if (type === 'unavailable-id') { try { p.destroy(); } catch (x) {} if (!S.leaving) startNet(); return; }
-    if (type === 'browser-incompatible') toast('Этот браузер не поддерживает звонки. Попробуйте Chrome, Safari или Firefox.');
-    if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(type)) { S.sigErr = true; setStatus('reconnecting'); }
-    console.warn('peer error', type, e);
   });
-}
-
-/* Хаб: первый вошедший держит адрес комнаты и раздаёт список участников и чат */
-function ensureHub() {
-  if (S.leaving || S.bconn || S.bpending || !S.peer || !S.peer.open) return;
-  S.bpending = true;
-  const attempt = ++S.battempt;
-  if (S.bpeer && S.bpeer.open) { connectHub(attempt); return; }
-  const bp = new Peer(hubId(), peerOpts());
-  let settled = false;
-  const giveUp = () => { if (attempt === S.battempt) { S.bpending = false; scheduleHub(); } };
-  bp.on('open', () => {
-    if (settled) return; settled = true;
-    S.bpeer = bp; S.dir = new Map();
-    bp.on('connection', onDirConn);
-    connectHub(attempt);
-  });
-  bp.on('error', (e) => {
-    if (!settled) {
-      settled = true; try { bp.destroy(); } catch (x) {}
-      if (e && e.type === 'unavailable-id') connectHub(attempt); else giveUp();
-    } else if (e && e.type === 'unavailable-id') dropHubRole(bp);
-  });
-  bp.on('disconnected', () => { if (S.bpeer === bp && !S.leaving) setTimeout(() => { try { if (bp.disconnected && !bp.destroyed) bp.reconnect(); } catch (x) {} }, 1000); });
-  bp.on('close', () => { if (S.bpeer === bp) S.bpeer = null; });
-  setTimeout(() => { if (!settled) { settled = true; try { bp.destroy(); } catch (x) {} giveUp(); } }, 9000);
-}
-function dropHubRole(bp) {
-  if (S.bpeer !== bp) return;
-  S.bpeer = null;
-  for (const e of S.dir.values()) { try { e.conn.close(); } catch (x) {} }
-  S.dir = new Map();
-  try { bp.destroy(); } catch (x) {}
-}
-function connectHub(attempt) {
-  if (attempt !== S.battempt) return;
-  const c = S.peer.connect(hubId(), { reliable: true, serialization: 'json' });
-  if (!c) { S.bpending = false; scheduleHub(); return; }
-  let opened = false;
-  const t = setTimeout(() => { if (!opened) { try { c.close(); } catch (e) {} S.hubTimeouts++; if (attempt === S.battempt && S.bpending) { S.bpending = false; scheduleHub(); } setStatus('reconnecting'); } }, 10000);
-  c.on('open', () => {
-    if (attempt !== S.battempt) { try { c.close(); } catch (e) {} return; }
-    opened = true; clearTimeout(t);
-    S.bconn = c; S.bpending = false; S.bseen = Date.now(); S.hubTimeouts = 0;
-    sendHub({ t: 'hello', nick: S.nick, muted: S.muted });
-    flushOutbox();
-    setStatus('online');
-  });
-  c.on('data', (d) => { if (S.bconn === c) { S.bseen = Date.now(); onHubData(d); } });
-  const lost = () => {
-    clearTimeout(t);
-    if (S.bconn === c) { S.bconn = null; hubLost(); }
-    else if (!opened && attempt === S.battempt && S.bpending) { S.bpending = false; scheduleHub(); }
+  act.hello = room.makeAction('hello');
+  act.chat = room.makeAction('chat');
+  act.hist = room.makeAction('hist');
+  act.hello.onMessage = (d, ctx) => onHello(d, ctx && ctx.peerId);
+  act.chat.onMessage = (d, ctx) => { const id = ctx && ctx.peerId; if (!id) return; const m = normMsg(Object.assign({}, d, { from: id, nick: (S.members.get(id) || {}).nick || d && d.nick })); if (m && rateOk(getPeer(id))) addMsg(m); };
+  act.hist.onMessage = (d) => { if (Array.isArray(d)) { d.slice(-300).forEach((m) => addMsg(normMsg(m), true)); renderAllMsgs(); } };
+  room.onPeerJoin = (id) => {
+    getPeer(id).fails = 0;
+    safe(() => room.addStream(S.outStream, { target: id }));
+    sendHello(id);
+    if (S.history.length) safe(() => act.hist.send(S.history.slice(-150), { target: id }));
+    blip(true); renderPeople();
   };
-  c.on('close', lost); c.on('error', lost);
+  room.onPeerLeave = (id) => { S.members.delete(id); dropPeer(id); blip(false); };
+  room.onPeerStream = (stream, id) => { const p = getPeer(id); p.fails = 0; setRemote(p, stream); };
+  safe(() => room.addStream(S.outStream));
+  setInterval(netCheck, 3000);
+  setTimeout(netCheck, 1500);
 }
-function hubLost() {
-  S.battempt++;
-  if (S.bconn) { const c = S.bconn; S.bconn = null; try { c.close(); } catch (e) {} }
-  S.bpending = false;
-  if (!S.leaving) { setStatus('reconnecting'); scheduleHub(); }
+function safe(fn) { try { const r = fn(); if (r && typeof r.catch === 'function') r.catch(() => {}); else if (Array.isArray(r)) r.forEach((x) => x && x.catch && x.catch(() => {})); } catch (e) {} }
+function sendHello(target) { if (act.hello) safe(() => act.hello.send({ nick: S.nick, muted: S.muted }, target ? { target } : undefined)); }
+function onHello(d, id) {
+  if (!id || !d || typeof d !== 'object') return;
+  S.members.set(id, { id, nick: clean(d.nick, 24) || 'Гость', muted: !!d.muted });
+  getPeer(id);
+  renderPeople();
 }
-function scheduleHub() {
-  if (S.btimer || S.leaving) return;
-  S.btimer = setTimeout(() => { S.btimer = null; ensureHub(); }, 300 + Math.random() * 1700);
+let relayDownSince = 0;
+function netCheck() {
+  if (!T || S.leaving) return;
+  let open = 0;
+  try { const socks = T.getRelaySockets ? T.getRelaySockets() : {}; for (const k in socks) if (socks[k] && socks[k].readyState === 1) open++; } catch (e) { open = 1; }
+  const now = Date.now();
+  if (open === 0) { if (!relayDownSince) relayDownSince = now; } else relayDownSince = 0;
+  S.sigErr = !!relayDownSince && now - relayDownSince > 8000;
+  setStatus(open > 0 ? 'online' : 'reconnecting');
+  // соединения с участниками
+  let peersPc = {};
+  try { peersPc = room ? room.getPeers() : {}; } catch (e) {}
+  for (const [id, p] of S.peers) {
+    const pc = peersPc[id];
+    const st = pc && (pc.connectionState || pc.iceConnectionState);
+    if (st === 'failed') { p.fails = Math.max(p.fails || 0, 2); }
+    if (!pc && !p.stream && now - (p.created || now) > 20000) { dropPeer(id); continue; }
+  }
+  renderPeople();
 }
-function sendHub(obj) { try { if (S.bconn && S.bconn.open) { S.bconn.send(obj); return true; } } catch (e) {} return false; }
-
-/* сторона хаба */
-function onDirConn(conn) {
-  if (!isRoomId(conn.peer)) { try { conn.close(); } catch (e) {} return; }
-  const entry = { id: conn.peer, nick: 'Гость', muted: false, conn, seen: Date.now(), hello: false };
-  conn.on('data', (d) => {
-    if (!d || typeof d !== 'object') return;
-    const cur = S.dir.get(conn.peer);
-    const e = cur && cur.conn === conn ? cur : entry;
-    e.seen = Date.now();
-    if (d.t === 'hello' || d.t === 'st') {
-      e.nick = clean(d.nick, 24) || 'Гость'; e.muted = !!d.muted;
-      if (!e.hello) {
-        e.hello = true;
-        if (cur && cur.conn !== conn) { try { cur.conn.close(); } catch (x) {} }
-        S.dir.set(conn.peer, e);
-        try { conn.send({ t: 'hist', h: S.history.slice(-150) }); } catch (x) {}
-      }
-      pushRoster();
-    } else if (d.t === 'ping') {
-      try { conn.send({ t: 'pong' }); } catch (x) {}
-    } else if (d.t === 'chat' && e.hello && d.m) {
-      const text = clean(d.m.text, 1000, true), id = clean(d.m.id, 40);
-      if (!text || !id) return;
-      if (!rateOk(e)) return;
-      const m = { id, text, nick: e.nick, from: conn.peer, ts: Date.now() };
-      addMsg(m);
-      for (const x of S.dir.values()) { try { x.conn.send({ t: 'chat', m }); } catch (er) {} }
-    }
-  });
-  const drop = () => { const e = S.dir.get(conn.peer); if (e && e.conn === conn) { S.dir.delete(conn.peer); pushRoster(); } };
-  conn.on('close', drop); conn.on('error', drop);
+function getPeer(id) {
+  let p = S.peers.get(id);
+  if (!p) {
+    p = { id, stream: null, audio: null, an: null, srcNode: null, vol: 1, localMute: false, fails: 0, el: null, created: Date.now() };
+    S.peers.set(id, p);
+  }
+  return p;
 }
 function rateOk(e) {
   const now = Date.now();
@@ -677,83 +624,12 @@ function rateOk(e) {
   if (e.rl.length >= 15) return false;
   e.rl.push(now); return true;
 }
-function pushRoster() {
-  if (S.rosterTimer) return;
-  S.rosterTimer = setTimeout(() => {
-    S.rosterTimer = null;
-    const list = [...S.dir.values()].filter((e) => e.hello).map((e) => ({ id: e.id, nick: e.nick, muted: e.muted }));
-    for (const e of S.dir.values()) { try { e.conn.send({ t: 'roster', list }); } catch (x) {} }
-  }, 60);
-}
-function hubPrune() {
-  if (!S.bpeer) return;
-  const now = Date.now(); let changed = false;
-  for (const [id, e] of S.dir) if (now - e.seen > 16000) { S.dir.delete(id); try { e.conn.close(); } catch (x) {} changed = true; }
-  if (changed) pushRoster();
-}
-
-/* сторона участника */
-function onHubData(d) {
-  if (!d || typeof d !== 'object') return;
-  if (d.t === 'roster' && Array.isArray(d.list)) onRoster(d.list);
-  else if (d.t === 'chat' && d.m) addMsg(normMsg(d.m));
-  else if (d.t === 'hist' && Array.isArray(d.h)) { d.h.slice(-300).forEach((m) => addMsg(normMsg(m), true)); renderAllMsgs(); }
-}
 function normMsg(m) {
   if (!m || typeof m !== 'object') return null;
   const id = clean(m.id, 40), text = clean(m.text, 1000, true);
   if (!id || !text) return null;
-  return { id, text, nick: clean(m.nick, 24) || 'Гость', from: String(m.from || '').slice(0, 80), ts: Number(m.ts) || Date.now() };
-}
-function onRoster(list) {
-  const prev = new Set(S.members.keys());
-  const next = new Map();
-  for (const x of list.slice(0, 50)) {
-    if (!x || !isRoomId(x.id)) continue;
-    next.set(x.id, { id: x.id, nick: clean(x.nick, 24) || 'Гость', muted: !!x.muted });
-  }
-  S.members = next;
-  const now = Date.now();
-  if (!S.firstRoster) {
-    let joined = false, left = false;
-    for (const id of next.keys()) if (!prev.has(id) && id !== S.myId) joined = true;
-    for (const id of prev) if (!next.has(id) && id !== S.myId) left = true;
-    if (joined) blip(true); else if (left) blip(false);
-  }
-  S.firstRoster = false;
-  for (const [id] of next) if (id !== S.myId) { const p = getPeer(id); p.missingSince = 0; }
-  for (const [id, p] of S.peers) if (!next.has(id) && !p.missingSince) p.missingSince = now;
-  maintain();
-  renderPeople();
-}
-function getPeer(id) {
-  let p = S.peers.get(id);
-  if (!p) {
-    let vol = 1;
-    p = { id, call: null, stream: null, audio: null, an: null, srcNode: null, vol, localMute: false, lastTry: 0, callAt: 0, discSince: 0, missingSince: 0, el: null };
-    S.peers.set(id, p);
-  }
-  return p;
-}
-function callPeer(id) {
-  const p = getPeer(id);
-  p.lastTry = Date.now();
-  let call;
-  try { call = S.peer.call(id, S.outStream, { metadata: { n: S.nick } }); } catch (e) { return; }
-  if (call) attachCall(p, call);
-}
-function onIncomingCall(call) {
-  if (!isRoomId(call.peer)) { try { call.close(); } catch (e) {} return; }
-  const p = getPeer(call.peer);
-  if (p.call && p.call !== call) { const old = p.call; p.call = null; try { old.close(); } catch (e) {} }
-  call.answer(S.outStream);
-  attachCall(p, call);
-}
-function attachCall(p, call) {
-  p.call = call; p.callAt = Date.now(); p.discSince = 0;
-  call.on('stream', (s) => { if (p.call === call) { p.fails = 0; setRemote(p, s); } });
-  const end = () => { if (p.call === call) { p.call = null; clearRemote(p); renderPeople(); } };
-  call.on('close', end); call.on('error', end);
+  const ts = Number(m.ts);
+  return { id, text, nick: clean(m.nick, 24) || 'Гость', from: String(m.from || '').slice(0, 80), ts: ts > 0 && ts < Date.now() + 60000 ? ts : Date.now() };
 }
 function setRemote(p, s) {
   if (p.stream === s) return;
@@ -782,7 +658,6 @@ function clearRemote(p) {
 }
 function dropPeer(id) {
   const p = S.peers.get(id); if (!p) return;
-  if (p.call) { const c = p.call; p.call = null; try { c.close(); } catch (e) {} }
   clearRemote(p);
   if (p.audio) p.audio.remove();
   S.peers.delete(id);
@@ -793,37 +668,11 @@ function applyVolume(p) {
   p.audio.volume = Math.max(0, Math.min(1, p.vol));
   p.audio.muted = S.deaf || p.localMute;
 }
-function maintain() {
-  if (!S.peer || S.leaving) return;
-  if (S.peer.disconnected && !S.peer.destroyed) { try { S.peer.reconnect(); } catch (e) {} }
-  if (S.bconn && Date.now() - S.bseen > 14000) hubLost();
-  if (!S.bconn && !S.bpending) scheduleHub();
-  hubPrune();
-  const now = Date.now();
-  for (const [id] of S.members) {
-    if (id === S.myId) continue;
-    const p = getPeer(id);
-    if (p.call) {
-      const pc = p.call.peerConnection;
-      const st = pc && (pc.iceConnectionState || pc.connectionState);
-      if (st === 'disconnected') { if (!p.discSince) p.discSince = now; } else p.discSince = 0;
-      const stuck = !p.stream && now - p.callAt > 15000;
-      if (st === 'failed' || st === 'closed' || stuck || (p.discSince && now - p.discSince > 8000)) {
-        const c = p.call; p.call = null; try { c.close(); } catch (e) {} clearRemote(p);
-        if (st === 'failed' || stuck) { p.fails = (p.fails || 0) + 1; renderPeople(); }
-      }
-    }
-    if (!p.call && S.myId < id && now - p.lastTry > 5000) callPeer(id);
-  }
-  for (const [id, p] of S.peers) if (!S.members.has(id) && p.missingSince && now - p.missingSince > 12000) dropPeer(id);
-}
-function heartbeat() { sendHub({ t: 'ping' }); }
 
 /* ---------- чат ---------- */
 function addMsg(m, silent) {
   if (!m) return;
   if (S.seen.has(m.id)) {
-    if (S.pendingIds.has(m.id)) { S.pendingIds.delete(m.id); const el = document.getElementById('m-' + m.id); if (el) el.classList.remove('pending'); }
     return;
   }
   S.seen.add(m.id);
@@ -849,7 +698,7 @@ function appendMsg(m) {
   const prev = box.lastElementChild;
   const cont = prev && prev.dataset.from === m.from && m.ts - (+prev.dataset.ts) < 120000;
   const el = document.createElement('div');
-  el.className = 'msg' + (cont ? ' cont' : '') + (S.pendingIds.has(m.id) ? ' pending' : '');
+  el.className = 'msg' + (cont ? ' cont' : '') + '';
   el.id = 'm-' + m.id; el.dataset.from = m.from; el.dataset.ts = m.ts;
   const ava = document.createElement('div'); ava.className = 'ava';
   ava.style.background = 'hsl(' + hue(m.nick) + ' 55% 45%)'; ava.textContent = initial(m.nick);
@@ -872,22 +721,14 @@ function renderAllMsgs() {
   S.history.sort((a, b) => a.ts - b.ts).forEach(appendMsg);
   box.scrollTop = box.scrollHeight;
 }
-function flushOutbox() {
-  while (S.outbox.length) {
-    const m = S.outbox[0];
-    if (!sendHub({ t: 'chat', m: { id: m.id, text: m.text } })) break;
-    S.outbox.shift();
-  }
-}
 $('#chatForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const inp = $('#msgIn');
   const text = clean(inp.value, 1000, true);
   if (!text) return;
   const m = { id: rid(12), text, nick: S.nick, from: S.myId, ts: Date.now() };
-  S.pendingIds.add(m.id);
   addMsg(m);
-  S.outbox.push(m); flushOutbox();
+  if (act.chat) safe(() => act.chat.send({ id: m.id, text: m.text, ts: m.ts, nick: S.nick }));
   inp.value = ''; autoGrow();
   inp.focus();
 });
@@ -903,8 +744,9 @@ function setStatus(s) {
   const el = $('#status'); el.className = 'status ' + s;
   let text = s === 'online' ? 'В сети' : s === 'reconnecting' ? 'Переподключаюсь…' : 'Подключение…';
   let help = '';
-  if (s !== 'online' && S.sigErr) { text = 'Нет связи с сервером'; help = 'Не удаётся достучаться до сервера PeerJS. Проверьте интернет. Если не помогает, попробуйте другую сеть (мобильный интернет вместо Wi-Fi или наоборот) или VPN: сервер может быть заблокирован у провайдера.'; }
-  else if (s !== 'online' && S.hubTimeouts >= 2) { text = 'Комната есть, но соединение не проходит'; help = S.turn ? 'Даже через ваш TURN-сервер соединение не проходит. Проверьте адрес, логин и пароль в настройках.' : 'Сеть не пропускает прямое соединение (так бывает на мобильном интернете и в рабочих Wi-Fi). Нужен TURN-сервер-посредник: настройки → «Сервер-посредник».'; }
+  const failing = [...S.peers.values()].filter((p) => !p.stream && p.fails >= 2).length;
+  if (s !== 'online' && S.sigErr) { text = 'Нет связи с сервером'; help = 'Не удаётся достучаться ни до одного сервера связи. Проверьте интернет; если не помогает, попробуйте другую сеть (мобильный интернет вместо Wi-Fi или наоборот) или VPN.'; }
+  else if (failing) { help = S.turn ? 'С кем-то не проходит соединение даже через ваш TURN-сервер. Проверьте адрес, логин и пароль в настройках.' : 'С кем-то не проходит прямое соединение (так бывает на мобильном интернете и в рабочих Wi-Fi). Нужен сервер-посредник: настройки → «Сервер-посредник».'; }
   $('#statusText').textContent = text;
   const d = $('#diag'); d.textContent = help; d.classList.toggle('hidden', !help);
 }
@@ -976,7 +818,7 @@ function updateCard(el, id) {
 }
 function renderPeople() {
   const list = $('#plist');
-  const others = [...S.members.keys()].filter((id) => id !== S.myId);
+  const others = [...S.peers.keys()].filter((id) => id !== S.myId);
   const ids = [S.myId, ...others];
   ids.forEach((id, i) => {
     let el = list.querySelector('[data-id="' + CSS.escape(id) + '"]');
@@ -1001,7 +843,7 @@ function renderControls() {
 }
 $('#micBtn').onclick = () => {
   S.muted = !S.muted; applyGain(); renderControls(); renderPeople();
-  sendHub({ t: 'st', nick: S.nick, muted: S.muted });
+  sendHello();
 };
 $('#deafBtn').onclick = () => {
   S.deaf = !S.deaf; for (const p of S.peers.values()) applyVolume(p);
@@ -1092,11 +934,6 @@ function loadTurnFromHash() {
   } catch (e) {}
   try { S.turn = validTurn(JSON.parse(ls('turn') || 'null')); } catch (e) { S.turn = null; }
 }
-function peerOpts() {
-  const ice = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }, { urls: 'stun:stun.cloudflare.com:3478' }];
-  if (S.turn) ice.push(S.turn);
-  return { debug: 0, config: { iceServers: ice, iceCandidatePoolSize: 2 } };
-}
 function renderTurn() {
   $('#turnState').textContent = S.turn ? '· настроен' : '';
   if (S.turn) { $('#turnUrls').value = S.turn.urls.join('\n'); $('#turnUser').value = S.turn.username; $('#turnPass').value = S.turn.credential; }
@@ -1107,16 +944,13 @@ $('#turnSave').onclick = () => {
   ls('turn', JSON.stringify(t)); leave(); location.href = location.pathname + '?r=' + encodeURIComponent(S.room);
 };
 $('#turnClear').onclick = () => { ls('turn', ''); leave(); location.href = location.pathname + '?r=' + encodeURIComponent(S.room); };
-$('#diag').addEventListener('click', () => { if (S.hubTimeouts >= 2) { $('#setBtn').click(); $('#turnBox').open = true; } });
+$('#diag').addEventListener('click', () => { if (!S.sigErr) { $('#setBtn').click(); $('#turnBox').open = true; } });
 
 /* выход и фон */
 $('#leaveBtn').onclick = () => { leave(); location.href = location.pathname + '?r=' + encodeURIComponent(S.room); };
 function leave() {
   if (S.leaving) return; S.leaving = true;
-  for (const p of S.peers.values()) { try { p.call && p.call.close(); } catch (e) {} }
-  try { S.bconn && S.bconn.close(); } catch (e) {}
-  try { S.bpeer && S.bpeer.destroy(); } catch (e) {}
-  try { S.peer && S.peer.destroy(); } catch (e) {}
+  try { room && room.leave(); } catch (e) {}
   try { S.rawStream && S.rawStream.getTracks().forEach((t) => t.stop()); } catch (e) {}
 }
 window.addEventListener('pagehide', leave);
@@ -1126,7 +960,7 @@ async function keepAwake() {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && S.ctx) {
     S.ctx.resume().catch(() => {});
-    if (S.peer) keepAwake();
+    if (room) keepAwake();
     if (S.tab === 'chat') { S.unread = 0; renderUnread(); }
   }
 });
