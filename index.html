@@ -221,6 +221,8 @@ textarea.field{resize:vertical;font-size:14px}
     <label for="micSel">Микрофон</label>
     <select id="micSel" class="field"></select>
     <div class="switch"><span>Рация (говорить, пока зажата кнопка или пробел)</span><input id="pttChk" type="checkbox"></div>
+    <label>Связь</label>
+    <p class="note" id="netInfo">—</p>
     <button id="closeSet" class="primary" type="button">Готово</button>
     <p class="note">Голос идёт напрямую между участниками. Сервер PeerJS нужен только чтобы найти друг друга.</p>
   </div>
@@ -558,76 +560,133 @@ function blip(up) {
 }
 
 /* ---------- сеть ----------
-   Сигналинг через Trystero (сеть публичных Nostr-релеев): нет единого сервера,
-   который может упасть или быть заблокирован. Голос и чат идут напрямую между участниками. */
-const TRYSTERO_URL = 'https://esm.run/trystero@0.26.0';
-let T = null, room = null, act = {};
+   Участники ищут друг друга сразу через две независимые сети сигналинга (Nostr-релеи и
+   WebTorrent-трекеры), чтобы блокировка одной из них у провайдера не мешала.
+   Голос и чат идут напрямую между участниками. */
+const STRATS = [
+  { name: 'nostr', label: 'сеть Nostr', url: 'https://esm.run/trystero@0.26.0' },
+  { name: 'torrent', label: 'сеть WebTorrent', url: 'https://esm.run/@trystero-p2p/torrent@0.26.0' }
+];
+const routes = [];
+S.uid = rid(16);
 
 async function startNet() {
+  S.myId = S.uid;
   setStatus('connecting');
-  try { T = await import(TRYSTERO_URL); }
-  catch (e) { console.error(e); S.sigErr = true; setStatus('reconnecting'); toast('Не загрузилась библиотека связи. Проверьте интернет и обновите страницу.'); return; }
-  S.myId = T.selfId;
   const ice = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }, { urls: 'stun:stun.cloudflare.com:3478' }];
   if (S.turn) ice.push(S.turn);
-  room = T.joinRoom({ appId: 'savacloud/pomoika-2', rtcConfig: { iceServers: ice } }, S.room, {
-    onJoinError: (err) => {
-      console.warn('join error', err);
-      const id = err && err.peerId;
-      if (id) { const p = getPeer(id); p.fails = (p.fails || 0) + 1; renderPeople(); }
-    }
-  });
-  act.hello = room.makeAction('hello');
-  act.chat = room.makeAction('chat');
-  act.hist = room.makeAction('hist');
-  act.hello.onMessage = (d, ctx) => onHello(d, ctx && ctx.peerId);
-  act.chat.onMessage = (d, ctx) => { const id = ctx && ctx.peerId; if (!id) return; const m = normMsg(Object.assign({}, d, { from: id, nick: (S.members.get(id) || {}).nick || d && d.nick })); if (m && rateOk(getPeer(id))) addMsg(m); };
-  act.hist.onMessage = (d) => { if (Array.isArray(d)) { d.slice(-300).forEach((m) => addMsg(normMsg(m), true)); renderAllMsgs(); } };
-  room.onPeerJoin = (id) => {
-    getPeer(id).fails = 0;
-    safe(() => room.addStream(S.outStream, { target: id }));
-    sendHello(id);
-    if (S.history.length) safe(() => act.hist.send(S.history.slice(-150), { target: id }));
-    blip(true); renderPeople();
-  };
-  room.onPeerLeave = (id) => { S.members.delete(id); dropPeer(id); blip(false); };
-  room.onPeerStream = (stream, id) => { const p = getPeer(id); p.fails = 0; setRemote(p, stream); };
-  safe(() => room.addStream(S.outStream));
+  await Promise.all(STRATS.map((st) => startRoute(st, ice)));
   setInterval(netCheck, 3000);
   setTimeout(netCheck, 1500);
 }
-function safe(fn) { try { const r = fn(); if (r && typeof r.catch === 'function') r.catch(() => {}); else if (Array.isArray(r)) r.forEach((x) => x && x.catch && x.catch(() => {})); } catch (e) {} }
-function sendHello(target) { if (act.hello) safe(() => act.hello.send({ nick: S.nick, muted: S.muted }, target ? { target } : undefined)); }
-function onHello(d, id) {
-  if (!id || !d || typeof d !== 'object') return;
-  S.members.set(id, { id, nick: clean(d.nick, 24) || 'Гость', muted: !!d.muted });
-  getPeer(id);
+async function startRoute(st, ice) {
+  const r = { name: st.name, label: st.label, T: null, room: null, act: {}, pids: new Map(), pending: new Map(), err: null, open: 0, total: 0 };
+  routes.push(r);
+  try { r.T = await import(st.url); }
+  catch (e) { console.warn('не загрузилась', st.name, e); r.err = 'load'; return; }
+  try {
+    r.room = r.T.joinRoom({ appId: 'savacloud/pomoika-2', rtcConfig: { iceServers: ice } }, S.room, {
+      onJoinError: (err) => {
+        console.warn(st.name, 'join error', err);
+        const uid = err && err.peerId && r.pids.get(err.peerId);
+        if (uid) { const p = getPeer(uid); p.fails = (p.fails || 0) + 1; renderPeople(); }
+      }
+    });
+  } catch (e) { console.warn(e); r.err = 'join'; return; }
+  const room = r.room;
+  r.act.hello = room.makeAction('hello');
+  r.act.chat = room.makeAction('chat');
+  r.act.hist = room.makeAction('hist');
+  r.act.hello.onMessage = (d, ctx) => onHello(r, d, ctx && ctx.peerId);
+  r.act.chat.onMessage = (d, ctx) => {
+    const uid = ctx && r.pids.get(ctx.peerId); if (!uid || !d) return;
+    const m = normMsg(Object.assign({}, d, { from: uid, nick: (S.members.get(uid) || {}).nick || d.nick }));
+    if (m && !S.seen.has(m.id) && rateOk(getPeer(uid))) addMsg(m);
+  };
+  r.act.hist.onMessage = (d) => { if (Array.isArray(d)) { const before = S.history.length; d.slice(-300).forEach((m) => addMsg(normMsg(m), true)); if (S.history.length !== before) renderAllMsgs(); } };
+  room.onPeerJoin = (pid) => {
+    safe(() => room.addStream(S.outStream, { target: pid }));
+    safe(() => r.act.hello.send(helloData(), { target: pid }));
+    if (S.history.length) safe(() => r.act.hist.send(S.history.slice(-150), { target: pid }));
+  };
+  room.onPeerLeave = (pid) => {
+    const uid = r.pids.get(pid); r.pids.delete(pid); r.pending.delete(pid);
+    if (uid) detachRoute(uid, r.name);
+  };
+  room.onPeerStream = (stream, pid) => {
+    const uid = r.pids.get(pid);
+    if (!uid) { r.pending.set(pid, stream); return; }
+    attachRoute(uid, r.name, stream);
+  };
+  safe(() => room.addStream(S.outStream));
+}
+function helloData() { return { uid: S.uid, nick: S.nick, muted: S.muted }; }
+function safe(fn) { try { const x = fn(); if (x && typeof x.catch === 'function') x.catch(() => {}); else if (Array.isArray(x)) x.forEach((y) => y && y.catch && y.catch(() => {})); } catch (e) {} }
+function sendHello() { for (const r of routes) if (r.act.hello) safe(() => r.act.hello.send(helloData())); }
+function onHello(r, d, pid) {
+  if (!pid || !d || typeof d !== 'object') return;
+  const uid = clean(d.uid, 32); if (!uid || uid === S.uid) return;
+  const known = S.peers.has(uid);
+  r.pids.set(pid, uid);
+  S.members.set(uid, { id: uid, nick: clean(d.nick, 24) || 'Гость', muted: !!d.muted });
+  const p = getPeer(uid);
+  if (!p.routes.has(r.name)) p.routes.set(r.name, { pid, stream: null });
+  else p.routes.get(r.name).pid = pid;
+  const st = r.pending.get(pid);
+  if (st) { r.pending.delete(pid); attachRoute(uid, r.name, st); }
+  if (!known) blip(true);
+  renderPeople();
+}
+function attachRoute(uid, name, stream) {
+  const p = getPeer(uid);
+  const rt = p.routes.get(name) || { pid: null, stream: null };
+  rt.stream = stream; p.routes.set(name, rt);
+  p.fails = 0;
+  if (!p.stream || !p.active || !p.routes.get(p.active) || !p.routes.get(p.active).stream) { p.active = name; setRemote(p, stream); }
+}
+function detachRoute(uid, name) {
+  const p = S.peers.get(uid); if (!p) return;
+  p.routes.delete(name);
+  if (!p.routes.size) { S.members.delete(uid); dropPeer(uid); blip(false); return; }
+  if (p.active === name) {
+    p.active = null; clearRemote(p);
+    for (const [n, rt] of p.routes) if (rt.stream) { p.active = n; setRemote(p, rt.stream); break; }
+  }
   renderPeople();
 }
 let relayDownSince = 0;
 function netCheck() {
-  if (!T || S.leaving) return;
-  let open = 0;
-  try { const socks = T.getRelaySockets ? T.getRelaySockets() : {}; for (const k in socks) if (socks[k] && socks[k].readyState === 1) open++; } catch (e) { open = 1; }
-  const now = Date.now();
-  if (open === 0) { if (!relayDownSince) relayDownSince = now; } else relayDownSince = 0;
-  S.sigErr = !!relayDownSince && now - relayDownSince > 8000;
-  setStatus(open > 0 ? 'online' : 'reconnecting');
-  // соединения с участниками
-  let peersPc = {};
-  try { peersPc = room ? room.getPeers() : {}; } catch (e) {}
-  for (const [id, p] of S.peers) {
-    const pc = peersPc[id];
-    const st = pc && (pc.connectionState || pc.iceConnectionState);
-    if (st === 'failed') { p.fails = Math.max(p.fails || 0, 2); }
-    if (!pc && !p.stream && now - (p.created || now) > 20000) { dropPeer(id); continue; }
+  if (S.leaving) return;
+  let anyOpen = false, allDone = routes.length === STRATS.length;
+  for (const r of routes) {
+    r.open = 0; r.total = 0;
+    if (!r.T) continue;
+    try { const socks = r.T.getRelaySockets ? r.T.getRelaySockets() : {}; for (const k in socks) { r.total++; if (socks[k] && socks[k].readyState === 1) r.open++; } } catch (e) { r.open = 1; }
+    if (r.open) anyOpen = true;
   }
+  const now = Date.now();
+  if (!anyOpen && allDone) { if (!relayDownSince) relayDownSince = now; } else if (anyOpen) relayDownSince = 0;
+  S.sigErr = !!relayDownSince && now - relayDownSince > 8000;
+  for (const [uid, p] of S.peers) {
+    let failed = false;
+    for (const r of routes) {
+      const rt = p.routes.get(r.name); if (!rt || !r.room) continue;
+      try { const pc = r.room.getPeers()[rt.pid]; const st = pc && (pc.connectionState || pc.iceConnectionState); if (st === 'failed') failed = true; } catch (e) {}
+    }
+    if (failed && !p.stream) p.fails = Math.max(p.fails || 0, 2);
+  }
+  setStatus(anyOpen ? 'online' : allDone ? 'reconnecting' : 'connecting');
   renderPeople();
+  renderNetInfo();
 }
+function netSummary() {
+  return routes.map((r) => r.label + ': ' + (r.err === 'load' ? 'не загрузилась (заблокирован cdn.jsdelivr.net / esm.run?)' : r.err ? 'ошибка' : r.total ? r.open + ' из ' + r.total + ' серверов' : 'подключаюсь…')).join(' · ');
+}
+function renderNetInfo() { const el = $('#netInfo'); if (el) el.textContent = netSummary(); }
 function getPeer(id) {
   let p = S.peers.get(id);
   if (!p) {
-    p = { id, stream: null, audio: null, an: null, srcNode: null, vol: 1, localMute: false, fails: 0, el: null, created: Date.now() };
+    p = { id, stream: null, audio: null, an: null, srcNode: null, vol: 1, localMute: false, fails: 0, el: null, routes: new Map(), active: null };
     S.peers.set(id, p);
   }
   return p;
@@ -742,7 +801,7 @@ $('#chatForm').addEventListener('submit', (e) => {
   if (!text) return;
   const m = { id: rid(12), text, nick: S.nick, from: S.myId, ts: Date.now() };
   addMsg(m);
-  if (act.chat) safe(() => act.chat.send({ id: m.id, text: m.text, ts: m.ts, nick: S.nick }));
+  for (const r of routes) if (r.act.chat) safe(() => r.act.chat.send({ id: m.id, text: m.text, ts: m.ts, nick: S.nick }));
   inp.value = ''; autoGrow();
   inp.focus();
 });
@@ -759,7 +818,7 @@ function setStatus(s) {
   let text = s === 'online' ? 'В сети' : s === 'reconnecting' ? 'Переподключаюсь…' : 'Подключение…';
   let help = '';
   const failing = [...S.peers.values()].filter((p) => !p.stream && p.fails >= 2).length;
-  if (s !== 'online' && S.sigErr) { text = 'Нет связи с сервером'; help = 'Не удаётся достучаться ни до одного сервера связи. Проверьте интернет; если не помогает, попробуйте другую сеть (мобильный интернет вместо Wi-Fi или наоборот) или VPN.'; }
+  if (s !== 'online' && S.sigErr) { text = 'Нет связи с сервером'; help = 'Не открывается ни одна сеть связи (' + netSummary() + '). Так бывает, когда провайдер блокирует зарубежные серверы, например в России. Включите VPN и перезагрузите страницу.'; }
   else if (failing) { help = S.turn ? 'С кем-то не проходит соединение даже через ваш TURN-сервер. Проверьте адрес, логин и пароль в настройках.' : 'С кем-то не проходит прямое соединение (так бывает на мобильном интернете и в рабочих Wi-Fi). Нужен сервер-посредник: настройки → «Сервер-посредник».'; }
   $('#statusText').textContent = text;
   const d = $('#diag'); d.textContent = help; d.classList.toggle('hidden', !help);
@@ -965,7 +1024,7 @@ $('#diag').addEventListener('click', () => { if (!S.sigErr) { $('#setBtn').click
 $('#leaveBtn').onclick = () => { leave(); location.href = location.pathname + '?r=' + encodeURIComponent(S.room); };
 function leave() {
   if (S.leaving) return; S.leaving = true;
-  try { room && room.leave(); } catch (e) {}
+  for (const r of routes) { try { r.room && r.room.leave(); } catch (e) {} }
   try { S.rawStream && S.rawStream.getTracks().forEach((t) => t.stop()); } catch (e) {}
 }
 window.addEventListener('pagehide', leave);
@@ -975,7 +1034,7 @@ async function keepAwake() {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && S.ctx) {
     S.ctx.resume().catch(() => {});
-    if (room) keepAwake();
+    if (routes.length) keepAwake();
     if (S.tab === 'chat') { S.unread = 0; renderUnread(); }
   }
 });
